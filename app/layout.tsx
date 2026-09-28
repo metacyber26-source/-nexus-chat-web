@@ -1,4 +1,4 @@
-import './globals.css' // Jika Anda pakai styling dasar
+import './globals.css'
 
 export const metadata = {
   title: 'Secure Next-Gen Chat',
