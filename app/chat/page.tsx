@@ -1,7 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'app/chat/node_modules/@types/react' // sesuaikan import React standar
-import { supabase } from '@/utils/supabase'
+import { useEffect, useState } from 'react'
+import { supabase } from '../../utils/supabase'
 
 type Message = {
   id: string
@@ -16,23 +16,18 @@ export default function ChatPage() {
   const [userId, setUserId] = useState<string>('')
 
   useEffect(() => {
-    // Ambil sesi user anonim/login saat ini
     async function getSession() {
       const { data: { session } } = await supabase.auth.getSession()
       if (session) {
         setUserId(session.user.id)
       } else {
-        // Auto sign-in anonim/guest sederhana jika belum login (opsional)
-        const { data, error } = await supabase.auth.signInAnonymously()
+        const { data } = await supabase.auth.signInAnonymously()
         if (data.user) setUserId(data.user.id)
       }
     }
     getSession()
-
-    // Ambil pesan awal
     fetchMessages()
 
-    // Setup Realtime Subscription
     const channel = supabase
       .channel('public:messages')
       .on(
@@ -50,7 +45,7 @@ export default function ChatPage() {
   }, [])
 
   async function fetchMessages() {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('messages')
       .select('*')
       .order('created_at', { ascending: true })
@@ -77,12 +72,10 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 text-white">
-      {/* Header */}
       <div className="p-4 bg-slate-800 border-b border-slate-700 font-bold text-center">
         Secure Next-Gen Chat
       </div>
 
-      {/* Daftar Pesan */}
       <div className="flex-1 p-4 overflow-y-auto space-y-3">
         {messages.map((msg) => {
           const isMe = msg.sender_id === userId
@@ -106,14 +99,13 @@ export default function ChatPage() {
         })}
       </div>
 
-      {/* Input Kirim Pesan */}
       <form onSubmit={sendMessage} className="p-3 bg-slate-800 border-t border-slate-700 flex gap-2">
         <input
           type="text"
           value={newMessage}
           onChange={(e) => setNewMessage(e.target.value)}
           placeholder="Ketik pesan rahasia..."
-          className="flex-1 bg-slate-900 border border-slate-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
+          className="flex-1 bg-slate-900 border border-slate-700 rounded-full px-4 py-2 text-sm focus:outline-none focus:border-blue-500 text-white"
         />
         <button
           type="submit"
