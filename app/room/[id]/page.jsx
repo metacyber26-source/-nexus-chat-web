@@ -14,10 +14,35 @@ export default function AudioRoomPage({ params }) {
     { id: 3, name: 'Siti', role: 'Listener', speaking: false },
   ];
 
-  const toggleMute = () => {
-    setIsMuted(!isMuted);
-    setIsSpeaking(!isMuted ? false : true);
+  // ==========================================
+  // 1. TEMPATKAN KODE LOGIKA MIKROFON DI SINI
+  // ==========================================
+  const startAudioStream = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      console.log("Akses mikrofon berhasil diberikan:", stream);
+      
+      setIsMuted(false);
+      setIsSpeaking(true);
+    } catch (error) {
+      console.error("Gagal mengakses mikrofon:", error);
+      alert("Izin mikrofon ditolak atau perangkat tidak mendukung.");
+    }
   };
+
+  const stopAudioStream = () => {
+    setIsMuted(true);
+    setIsSpeaking(false);
+  };
+
+  const toggleMicrophone = () => {
+    if (isMuted) {
+      startAudioStream();
+    } else {
+      stopAudioStream();
+    }
+  };
+  // ==========================================
 
   return (
     <div className="flex flex-col h-screen bg-slate-900 text-white p-4">
@@ -43,7 +68,6 @@ export default function AudioRoomPage({ params }) {
                 : 'bg-slate-800/50 border-slate-700'
             }`}
           >
-            {/* Avatar Peserta */}
             <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-xl font-bold mb-2 border-2 border-slate-600">
               {user.name.charAt(0)}
             </div>
@@ -55,8 +79,9 @@ export default function AudioRoomPage({ params }) {
 
       {/* Kontrol Audio di Bagian Bawah */}
       <div className="flex justify-center items-center gap-4 py-4 border-t border-slate-800 bg-slate-900/80 backdrop-blur">
+        {/* Hubungkan tombol dengan fungsi toggleMicrophone */}
         <button
-          onClick={toggleMute}
+          onClick={toggleMicrophone}
           className={`flex items-center gap-2 px-6 py-3 rounded-full font-semibold text-sm transition ${
             isMuted
               ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
