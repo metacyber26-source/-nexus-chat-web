@@ -27,6 +27,13 @@ type AttendanceRecord = {
   joined_at: string
 }
 
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ],
+}
+
 export default function CommunityCallPage() {
   const [rooms, setRooms] = useState<Room[]>([])
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null)
@@ -39,10 +46,15 @@ export default function CommunityCallPage() {
 
   const [isAudioActive, setIsAudioActive] = useState(false)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
-  const localAudioRef = useRef<HTMLAudioElement | null>(null)
-  const screenShareRef = useRef<HTMLVideoElement | null>(null)
+  
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
+  const screenShareRef = useRef<HTMLVideoElement | null>(null)
+  const remoteAudioContainerRef = useRef<HTMLDivElement | null>(null)
+
+  const peersRef = useRef<{ [key: string]: RTCPeerConnection }>({})
+  const signalingChannelRef = useRef<any>(null)
+  const myPeerId = useRef<string>(Math.random().toString(36).substring(2, 9))
 
   useEffect(() => {
     function handleOnline() { setIsOnline(true); syncOfflineMessages(); }
@@ -69,7 +81,7 @@ export default function CommunityCallPage() {
     fetchAttendance(currentRoom.id)
     recordAttendance(currentRoom.id, userName)
 
-    const channel = supabase
+    const chatChannel = supabase
       .channel(`room-stream:${currentRoom.id}`)
       .on(
         'postgres_changes',
@@ -85,10 +97,102 @@ export default function CommunityCallPage() {
       )
       .subscribe()
 
+    // WebRTC Signaling Channel via Supabase Realtime Broadcast
+    const rtcChannel = supabase.channel(`webrtc:${currentRoom.id}`, {
+      config: { broadcast: { self: false } },
+    })
+
+    rtcChannel
+      .on('broadcast', { event: 'signal' }, async ({ payload }) => {
+        const { senderId, type, data } = payload
+        if (senderId === myPeerId.current) return
+
+        if (!peersRef.current[senderId]) {
+          peersRef.current[senderId] = createPeerConnection(senderId)
+        }
+        const pc = peersRef.current[senderId]
+
+        if (type === 'offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data))
+          if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach((track) => {
+              pc.addTrack(track, localStreamRef.current!)
+            })
+          }
+          const answer = await pc.createAnswer()
+          await pc.setLocalDescription(answer)
+          rtcChannel.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload: { senderId: myPeerId.current, type: 'answer', data: answer },
+          })
+        } else if (type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(data))
+        } else if (type === 'candidate') {
+          if (data) {
+            await pc.addIceCandidate(new RTCIceCandidate(data))
+          }
+        }
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED' && isAudioActive) {
+          // Beritahu pengguna lain bahwa kita sudah di room
+          rtcChannel.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload: { senderId: myPeerId.current, type: 'join', data: {} },
+          })
+        }
+      })
+
+    signalingChannelRef.current = rtcChannel
+
     return () => {
-      supabase.removeChannel(channel)
+      supabase.removeChannel(chatChannel)
+      supabase.removeChannel(rtcChannel)
+      cleanupWebRTC()
     }
   }, [currentRoom, isJoined])
+
+  function createPeerConnection(targetPeerId: string) {
+    const pc = new RTCPeerConnection(ICE_SERVERS)
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && signalingChannelRef.current) {
+        signalingChannelRef.current.send({
+          type: 'broadcast',
+          event: 'signal',
+          payload: { senderId: myPeerId.current, type: 'candidate', data: event.candidate },
+        })
+      }
+    }
+
+    pc.ontrack = (event) => {
+      const remoteStream = event.streams[0]
+      if (remoteAudioContainerRef.current) {
+        let audioEl = document.getElementById(`audio-${targetPeerId}`) as HTMLAudioElement
+        if (!audioEl) {
+          audioEl = document.createElement('audio')
+          audioEl.id = `audio-${targetPeerId}`
+          audioEl.autoplay = true
+          audioEl.playsInline = true
+          remoteAudioContainerRef.current.appendChild(audioEl)
+        }
+        audioEl.srcObject = remoteStream
+      }
+    }
+
+    return pc
+  }
+
+  async function cleanupWebRTC() {
+    Object.values(peersRef.current).forEach((pc) => pc.close())
+    peersRef.current = {}
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop())
+      localStreamRef.current = null
+    }
+  }
 
   async function fetchRooms() {
     const { data } = await supabase.from('rooms').select('*').order('created_at', { ascending: true })
@@ -160,9 +264,7 @@ export default function CommunityCallPage() {
 
   async function toggleAudioChat() {
     if (isAudioActive) {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop())
-      }
+      cleanupWebRTC()
       setIsAudioActive(false)
     } else {
       try {
@@ -171,10 +273,18 @@ export default function CommunityCallPage() {
           video: false,
         })
         localStreamRef.current = stream
-        if (localAudioRef.current) localAudioRef.current.srcObject = stream
         setIsAudioActive(true)
+
+        // Hubungkan ke semua peer yang sudah ada di channel signaling
+        if (signalingChannelRef.current) {
+          signalingChannelRef.current.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload: { senderId: myPeerId.current, type: 'join', data: {} },
+          })
+        }
       } catch (err) {
-        alert('Gagal mengakses mikrofon.')
+        alert('Gagal mengakses mikrofon. Pastikan izin browser diberikan.')
       }
     }
   }
@@ -239,6 +349,9 @@ export default function CommunityCallPage() {
         </div>
       )}
 
+      {/* Container Audio Jarak Jauh (Hidden) */}
+      <div ref={remoteAudioContainerRef} className="hidden" />
+
       {/* Sidebar */}
       <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden md:flex">
         <div className="p-4 border-b border-slate-800 font-bold text-sm text-emerald-400">NUSANTARA NEXUS</div>
@@ -270,7 +383,7 @@ export default function CommunityCallPage() {
             <button
               onClick={toggleAudioChat}
               className={`px-2.5 py-1 rounded text-[11px] font-semibold transition ${
-                isAudioActive ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                isAudioActive ? 'bg-red-600 text-white animate-pulse' : 'bg-emerald-600 text-white'
               }`}
             >
               {isAudioActive ? '🔴 Matikan Suara' : '🎙️ Mikrofon'}
@@ -302,8 +415,6 @@ export default function CommunityCallPage() {
             </span>
           </div>
         )}
-
-        <audio ref={localAudioRef} autoPlay playsInline muted />
 
         {/* Daftar Pesan */}
         <div className="flex-1 p-3 overflow-y-auto space-y-2.5">
