@@ -97,7 +97,6 @@ export default function CommunityCallPage() {
       )
       .subscribe()
 
-    // WebRTC Signaling Channel via Supabase Realtime Broadcast
     const rtcChannel = supabase.channel(`webrtc:${currentRoom.id}`, {
       config: { broadcast: { self: false } },
     })
@@ -108,11 +107,24 @@ export default function CommunityCallPage() {
         if (senderId === myPeerId.current) return
 
         if (!peersRef.current[senderId]) {
-          peersRef.current[senderId] = createPeerConnection(senderId)
+          peersRef.current[senderId] = createPeerConnection(senderId, rtcChannel)
         }
         const pc = peersRef.current[senderId]
 
-        if (type === 'offer') {
+        if (type === 'join') {
+          if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach((track) => {
+              pc.addTrack(track, localStreamRef.current!)
+            })
+          }
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          rtcChannel.send({
+            type: 'broadcast',
+            event: 'signal',
+            payload: { senderId: myPeerId.current, type: 'offer', data: offer },
+          })
+        } else if (type === 'offer') {
           await pc.setRemoteDescription(new RTCSessionDescription(data))
           if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach((track) => {
@@ -136,7 +148,6 @@ export default function CommunityCallPage() {
       })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED' && isAudioActive) {
-          // Beritahu pengguna lain bahwa kita sudah di room
           rtcChannel.send({
             type: 'broadcast',
             event: 'signal',
@@ -154,12 +165,12 @@ export default function CommunityCallPage() {
     }
   }, [currentRoom, isJoined])
 
-  function createPeerConnection(targetPeerId: string) {
+  function createPeerConnection(targetPeerId: string, rtcChannel: any) {
     const pc = new RTCPeerConnection(ICE_SERVERS)
 
     pc.onicecandidate = (event) => {
-      if (event.candidate && signalingChannelRef.current) {
-        signalingChannelRef.current.send({
+      if (event.candidate && rtcChannel) {
+        rtcChannel.send({
           type: 'broadcast',
           event: 'signal',
           payload: { senderId: myPeerId.current, type: 'candidate', data: event.candidate },
@@ -275,7 +286,6 @@ export default function CommunityCallPage() {
         localStreamRef.current = stream
         setIsAudioActive(true)
 
-        // Hubungkan ke semua peer yang sudah ada di channel signaling
         if (signalingChannelRef.current) {
           signalingChannelRef.current.send({
             type: 'broadcast',
@@ -297,12 +307,19 @@ export default function CommunityCallPage() {
       setIsScreenSharing(false)
     } else {
       try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          alert('Fitur berbagi layar tidak didukung di perangkat/browser seluler ini.')
+          return
+        }
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false })
         screenStreamRef.current = stream
         if (screenShareRef.current) screenShareRef.current.srcObject = stream
         setIsScreenSharing(true)
         stream.getVideoTracks()[0].onended = () => setIsScreenSharing(false)
-      } catch (err) {}
+      } catch (err) {
+        console.error(err)
+        alert('Berbagi layar dibatalkan atau tidak diizinkan oleh sistem.')
+      }
     }
   }
 
@@ -349,7 +366,6 @@ export default function CommunityCallPage() {
         </div>
       )}
 
-      {/* Container Audio Jarak Jauh (Hidden) */}
       <div ref={remoteAudioContainerRef} className="hidden" />
 
       {/* Sidebar */}
@@ -378,7 +394,6 @@ export default function CommunityCallPage() {
             <span className="text-[11px] text-slate-400">Akun: <strong className="text-white">{userName}</strong></span>
           </div>
           
-          {/* Menu Tombol Aksi */}
           <div className="flex flex-wrap gap-1.5 pt-1">
             <button
               onClick={toggleAudioChat}
@@ -416,7 +431,6 @@ export default function CommunityCallPage() {
           </div>
         )}
 
-        {/* Daftar Pesan */}
         <div className="flex-1 p-3 overflow-y-auto space-y-2.5">
           {messages.map((msg, index) => {
             const isMe = msg.user_name === userName
@@ -431,7 +445,6 @@ export default function CommunityCallPage() {
           })}
         </div>
 
-        {/* Input Pesan */}
         <form onSubmit={sendMessage} className="p-2.5 bg-slate-900 border-t border-slate-800 flex gap-2">
           <input
             type="text"
