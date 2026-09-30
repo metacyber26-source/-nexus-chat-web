@@ -17,8 +17,9 @@ type Message = {
   room_id: string
   content: string
   user_name: string
+  type?: 'text' | 'audio'
+  media_url?: string
   created_at?: string
-  pending?: boolean
 }
 
 type AttendanceRecord = {
@@ -27,16 +28,7 @@ type AttendanceRecord = {
   joined_at: string
 }
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun.stunprotocol.org:3478' },
-  ],
-}
-
-export default function CommunityCallPage() {
+export default function WalkieTalkiePage() {
   const [rooms, setRooms] = useState<Room[]>([])
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -46,21 +38,16 @@ export default function CommunityCallPage() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([])
   const [isOnline, setIsOnline] = useState(true)
 
-  const [isAudioActive, setIsAudioActive] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
-  const [activePeers, setActivePeers] = useState<string[]>([])
   
-  const localStreamRef = useRef<MediaStream | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
   const screenStreamRef = useRef<MediaStream | null>(null)
   const screenShareRef = useRef<HTMLVideoElement | null>(null)
-  const remoteAudioContainerRef = useRef<HTMLDivElement | null>(null)
-
-  const peersRef = useRef<{ [key: string]: RTCPeerConnection }>({})
-  const signalingChannelRef = useRef<any>(null)
-  const myPeerId = useRef<string>(Math.random().toString(36).substring(2, 9))
 
   useEffect(() => {
-    function handleOnline() { setIsOnline(true); syncOfflineMessages(); }
+    function handleOnline() { setIsOnline(true); }
     function handleOffline() { setIsOnline(false); }
 
     window.addEventListener('online', handleOnline)
@@ -91,140 +78,17 @@ export default function CommunityCallPage() {
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${currentRoom.id}` },
         (payload) => {
           setMessages((prev) => {
-            if (prev.some((m) => m.content === payload.new.content && m.user_name === payload.new.user_name)) {
-              return prev
-            }
+            if (prev.some((m) => m.id === payload.new.id)) return prev
             return [...prev, payload.new as Message]
           })
         }
       )
       .subscribe()
 
-    const rtcChannel = supabase.channel(`webrtc:${currentRoom.id}`, {
-      config: { broadcast: { self: false } },
-    })
-
-    rtcChannel
-      .on('broadcast', { event: 'signal' }, async ({ payload }) => {
-        const { senderId, type, data } = payload
-        if (senderId === myPeerId.current) return
-
-        if (!peersRef.current[senderId]) {
-          peersRef.current[senderId] = createPeerConnection(senderId, rtcChannel)
-        }
-        const pc = peersRef.current[senderId]
-
-        if (type === 'join') {
-          setActivePeers((prev) => Array.from(new Set([...prev, senderId])))
-          if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach((track) => {
-              pc.addTrack(track, localStreamRef.current!)
-            })
-          }
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          rtcChannel.send({
-            type: 'broadcast',
-            event: 'signal',
-            payload: { senderId: myPeerId.current, type: 'offer', data: offer },
-          })
-        } else if (type === 'offer') {
-          setActivePeers((prev) => Array.from(new Set([...prev, senderId])))
-          await pc.setRemoteDescription(new RTCSessionDescription(data))
-          if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach((track) => {
-              pc.addTrack(track, localStreamRef.current!)
-            })
-          }
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-          rtcChannel.send({
-            type: 'broadcast',
-            event: 'signal',
-            payload: { senderId: myPeerId.current, type: 'answer', data: answer },
-          })
-        } else if (type === 'answer') {
-          await pc.setRemoteDescription(new RTCSessionDescription(data))
-        } else if (type === 'candidate') {
-          if (data) {
-            await pc.addIceCandidate(new RTCIceCandidate(data))
-          }
-        } else if (type === 'leave') {
-          if (peersRef.current[senderId]) {
-            peersRef.current[senderId].close()
-            delete peersRef.current[senderId]
-          }
-          setActivePeers((prev) => prev.filter(id => id !== senderId))
-        }
-      })
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED' && isAudioActive) {
-          rtcChannel.send({
-            type: 'broadcast',
-            event: 'signal',
-            payload: { senderId: myPeerId.current, type: 'join', data: {} },
-          })
-        }
-      })
-
-    signalingChannelRef.current = rtcChannel
-
     return () => {
       supabase.removeChannel(chatChannel)
-      supabase.removeChannel(rtcChannel)
-      cleanupWebRTC()
     }
   }, [currentRoom, isJoined])
-
-  function createPeerConnection(targetPeerId: string, rtcChannel: any) {
-    const pc = new RTCPeerConnection(ICE_SERVERS)
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && rtcChannel) {
-        rtcChannel.send({
-          type: 'broadcast',
-          event: 'signal',
-          payload: { senderId: myPeerId.current, type: 'candidate', data: event.candidate },
-        })
-      }
-    }
-
-    pc.ontrack = (event) => {
-      const remoteStream = event.streams[0]
-      if (remoteAudioContainerRef.current) {
-        let audioEl = document.getElementById(`audio-${targetPeerId}`) as HTMLAudioElement
-        if (!audioEl) {
-          audioEl = document.createElement('audio')
-          audioEl.id = `audio-${targetPeerId}`
-          audioEl.autoplay = true
-          audioEl.controls = true // Ditampilkan agar bisa di-tap jika diblokir browser HP
-          audioEl.className = 'w-full my-1'
-          remoteAudioContainerRef.current.appendChild(audioEl)
-        }
-        audioEl.srcObject = remoteStream
-        audioEl.play().catch(e => console.log('Autoplay dicegah browser, perlu interaksi klik:', e))
-      }
-    }
-
-    return pc
-  }
-
-  async function cleanupWebRTC() {
-    if (signalingChannelRef.current) {
-      signalingChannelRef.current.send({
-        type: 'broadcast',
-        event: 'signal',
-        payload: { senderId: myPeerId.current, type: 'leave', data: {} },
-      })
-    }
-    Object.values(peersRef.current).forEach((pc) => pc.close())
-    peersRef.current = {}
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop())
-      localStreamRef.current = null
-    }
-    setActivePeers([])
-  }
 
   async function fetchRooms() {
     const { data } = await supabase.from('rooms').select('*').order('created_at', { ascending: true })
@@ -257,17 +121,6 @@ export default function CommunityCallPage() {
     fetchAttendance(roomId)
   }
 
-  async function syncOfflineMessages() {
-    const offlineQueue = JSON.parse(localStorage.getItem('offline_messages') || '[]')
-    if (offlineQueue.length === 0) return
-
-    for (const msg of offlineQueue) {
-      await supabase.from('messages').insert([msg])
-    }
-    localStorage.removeItem('offline_messages')
-    if (currentRoom) fetchMessages(currentRoom.id)
-  }
-
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault()
     if (!newMessage.trim() || !currentRoom || !userName.trim()) return
@@ -276,16 +129,7 @@ export default function CommunityCallPage() {
       room_id: currentRoom.id,
       user_name: userName,
       content: newMessage,
-    }
-
-    if (!isOnline) {
-      const offlineQueue = JSON.parse(localStorage.getItem('offline_messages') || '[]')
-      offlineQueue.push(messagePayload)
-      localStorage.setItem('offline_messages', JSON.stringify(offlineQueue))
-
-      setMessages((prev) => [...prev, { ...messagePayload, pending: true }])
-      setNewMessage('')
-      return
+      type: 'text',
     }
 
     const { error } = await supabase.from('messages').insert([messagePayload])
@@ -294,29 +138,61 @@ export default function CommunityCallPage() {
     }
   }
 
-  async function toggleAudioChat() {
-    if (isAudioActive) {
-      cleanupWebRTC()
-      setIsAudioActive(false)
-    } else {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          video: false,
-        })
-        localStreamRef.current = stream
-        setIsAudioActive(true)
-
-        if (signalingChannelRef.current) {
-          signalingChannelRef.current.send({
-            type: 'broadcast',
-            event: 'signal',
-            payload: { senderId: myPeerId.current, type: 'join', data: {} },
-          })
+  // Fungsi PTT (Push-to-Talk) Rekam Suara
+  async function startRecording() {
+    audioChunksRef.current = []
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
         }
-      } catch (err) {
-        alert('Gagal mengakses mikrofon. Pastikan izin browser diberikan.')
       }
+
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+        const fileName = `voice_${Date.now()}.webm`
+        
+        // Unggah ke Supabase Storage Bucket 'chat-media'
+        const { error: uploadError } = await supabase.storage
+          .from('chat-media')
+          .upload(fileName, audioBlob)
+
+        if (uploadError) {
+          alert('Gagal mengunggah pesan suara. Pastikan Storage Bucket "chat-media" sudah disetel publik.')
+          return
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from('chat-media')
+          .getPublicUrl(fileName)
+
+        // Kirim referensi file audio ke tabel pesan
+        await supabase.from('messages').insert([{
+          room_id: currentRoom?.id,
+          user_name: userName,
+          content: '🎤 [Pesan Suara]',
+          type: 'audio',
+          media_url: publicUrlData.publicUrl
+        }])
+
+        stream.getTracks().forEach(track => track.stop())
+      }
+
+      mediaRecorderRef.current = recorder
+      recorder.start()
+      setIsRecording(true)
+    } catch (err) {
+      alert('Gagal mengakses mikrofon perangkat.')
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
     }
   }
 
@@ -329,7 +205,7 @@ export default function CommunityCallPage() {
     } else {
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-          alert('Fitur berbagi layar tidak didukung di perangkat/browser seluler ini.')
+          alert('Fitur berbagi layar tidak didukung di perangkat seluler ini.')
           return
         }
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false })
@@ -338,7 +214,7 @@ export default function CommunityCallPage() {
         setIsScreenSharing(true)
         stream.getVideoTracks()[0].onended = () => setIsScreenSharing(false)
       } catch (err) {
-        alert('Berbagi layar dibatalkan atau tidak diizinkan oleh sistem.')
+        alert('Berbagi layar dibatalkan.')
       }
     }
   }
@@ -358,8 +234,8 @@ export default function CommunityCallPage() {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-slate-950 text-white p-4">
         <div className="w-full max-w-sm bg-slate-900 p-6 rounded-2xl border border-slate-800 shadow-xl space-y-4">
-          <h1 className="text-xl font-bold text-center">NUSANTARA NEXUS</h1>
-          <p className="text-xs text-slate-400 text-center">Masukkan nama Anda untuk masuk ke ruang kolaborasi.</p>
+          <h1 className="text-xl font-bold text-center text-emerald-400">ICP2E JAWA TIMUR</h1>
+          <p className="text-xs text-slate-400 text-center">Masukkan nama Anda untuk bergabung ke ruang diskusi.</p>
           <input
             type="text"
             placeholder="Nama Anda..."
@@ -382,13 +258,13 @@ export default function CommunityCallPage() {
     <div className="flex h-screen bg-slate-950 text-white overflow-hidden">
       {!isOnline && (
         <div className="absolute top-0 left-0 right-0 bg-amber-600 text-black text-center text-xs py-1 font-bold z-50">
-          ⚠️ Sinyal Lemah / Offline. Pesan disinkronkan otomatis.
+          ⚠️ Koneksi Terputus (Offline).
         </div>
       )}
 
       {/* Sidebar */}
       <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden md:flex">
-        <div className="p-4 border-b border-slate-800 font-bold text-sm text-emerald-400">NUSANTARA NEXUS</div>
+        <div className="p-4 border-b border-slate-800 font-bold text-sm text-emerald-400">ICP2E JAWA TIMUR</div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {rooms.map((room) => (
             <button
@@ -408,20 +284,11 @@ export default function CommunityCallPage() {
       <div className="flex-1 flex flex-col h-full">
         <div className="p-3 bg-slate-900 border-b border-slate-800 flex flex-col gap-2">
           <div className="flex justify-between items-center">
-            <span className="font-bold text-sm text-emerald-400"># {currentRoom?.name || 'NUSANTARA NEXUS'}</span>
+            <span className="font-bold text-sm text-emerald-400"># {currentRoom?.name || 'Diskusi Komunitas'}</span>
             <span className="text-[11px] text-slate-400">Akun: <strong className="text-white">{userName}</strong></span>
           </div>
           
           <div className="flex flex-wrap gap-1.5 pt-1">
-            <button
-              onClick={toggleAudioChat}
-              className={`px-2.5 py-1 rounded text-[11px] font-semibold transition ${
-                isAudioActive ? 'bg-red-600 text-white animate-pulse' : 'bg-emerald-600 text-white'
-              }`}
-            >
-              {isAudioActive ? `🔴 Matikan Suara (${activePeers.length} Terhubung)` : '🎙️ Mikrofon'}
-            </button>
-
             <button
               onClick={toggleScreenShare}
               className={`px-2.5 py-1 rounded text-[11px] font-semibold transition ${
@@ -440,15 +307,6 @@ export default function CommunityCallPage() {
           </div>
         </div>
 
-        {/* Panel Audio Masuk (Muncul jika ada suara aktif agar bisa diputar di HP) */}
-        <div className="px-3 bg-slate-900/50 border-b border-slate-800">
-          <div ref={remoteAudioContainerRef} className="text-xs text-slate-400 py-1">
-            {isAudioActive && activePeers.length === 0 && (
-              <span className="text-amber-400 text-[11px]">Menunggu partisipan lain bergabung ke saluran suara...</span>
-            )}
-          </div>
-        </div>
-
         {isScreenSharing && (
           <div className="bg-black p-2 border-b border-slate-800 flex justify-center items-center h-40 relative">
             <video ref={screenShareRef} autoPlay playsInline className="h-full rounded object-contain" />
@@ -458,35 +316,60 @@ export default function CommunityCallPage() {
           </div>
         )}
 
+        {/* Daftar Pesan */}
         <div className="flex-1 p-3 overflow-y-auto space-y-2.5">
           {messages.map((msg, index) => {
             const isMe = msg.user_name === userName
             return (
               <div key={msg.id || index} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                <span className="text-[10px] text-slate-400 px-1">{msg.user_name} {msg.pending && '(Pending)'}</span>
+                <span className="text-[10px] text-slate-400 px-1">{msg.user_name}</span>
                 <div className={`max-w-[85%] p-2.5 rounded-xl text-sm ${isMe ? 'bg-emerald-600 text-white' : 'bg-slate-900 border border-slate-800 text-slate-200'}`}>
-                  {msg.content}
+                  {msg.type === 'audio' && msg.media_url ? (
+                    <div className="space-y-1">
+                      <span className="text-xs font-semibold block">🎤 Pesan Suara</span>
+                      <audio controls src={msg.media_url} className="w-full h-8 mt-1" />
+                    </div>
+                  ) : (
+                    msg.content
+                  )}
                 </div>
               </div>
             )
           })}
         </div>
 
-        <form onSubmit={sendMessage} className="p-2.5 bg-slate-900 border-t border-slate-800 flex gap-2">
-          <input
-            type="text"
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            placeholder="Ketik pesan..."
-            className="flex-1 bg-slate-950 border border-slate-800 rounded-full px-3.5 py-2 text-xs focus:outline-none focus:border-emerald-500 text-white"
-          />
+        {/* Panel Kontrol Bawah (Tombol PTT & Input Teks) */}
+        <div className="p-2.5 bg-slate-900 border-t border-slate-800 flex items-center gap-2">
           <button
-            type="submit"
-            className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-full text-xs font-semibold transition"
+            type="button"
+            onMouseDown={startRecording}
+            onMouseUp={stopRecording}
+            onTouchStart={startRecording}
+            onTouchEnd={stopRecording}
+            className={`px-3 py-2 rounded-full text-xs font-semibold transition select-none ${
+              isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700'
+            }`}
+            title="Tekan dan tahan untuk merekam suara"
           >
-            Kirim
+            {isRecording ? '🎙️ Lepas untuk Kirim' : '🎙️ Tahan Bicara'}
           </button>
-        </form>
+
+          <form onSubmit={sendMessage} className="flex-1 flex gap-2">
+            <input
+              type="text"
+              value={newMessage}
+              onChange={(e) => setNewMessage(e.target.value)}
+              placeholder="Ketik pesan..."
+              className="flex-1 bg-slate-950 border border-slate-800 rounded-full px-3.5 py-2 text-xs focus:outline-none focus:border-emerald-500 text-white"
+            />
+            <button
+              type="submit"
+              className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-full text-xs font-semibold transition"
+            >
+              Kirim
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   )
