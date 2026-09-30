@@ -31,6 +31,8 @@ const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.stunprotocol.org:3478' },
   ],
 }
 
@@ -46,6 +48,7 @@ export default function CommunityCallPage() {
 
   const [isAudioActive, setIsAudioActive] = useState(false)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
+  const [activePeers, setActivePeers] = useState<string[]>([])
   
   const localStreamRef = useRef<MediaStream | null>(null)
   const screenStreamRef = useRef<MediaStream | null>(null)
@@ -112,6 +115,7 @@ export default function CommunityCallPage() {
         const pc = peersRef.current[senderId]
 
         if (type === 'join') {
+          setActivePeers((prev) => Array.from(new Set([...prev, senderId])))
           if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach((track) => {
               pc.addTrack(track, localStreamRef.current!)
@@ -125,6 +129,7 @@ export default function CommunityCallPage() {
             payload: { senderId: myPeerId.current, type: 'offer', data: offer },
           })
         } else if (type === 'offer') {
+          setActivePeers((prev) => Array.from(new Set([...prev, senderId])))
           await pc.setRemoteDescription(new RTCSessionDescription(data))
           if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach((track) => {
@@ -144,6 +149,12 @@ export default function CommunityCallPage() {
           if (data) {
             await pc.addIceCandidate(new RTCIceCandidate(data))
           }
+        } else if (type === 'leave') {
+          if (peersRef.current[senderId]) {
+            peersRef.current[senderId].close()
+            delete peersRef.current[senderId]
+          }
+          setActivePeers((prev) => prev.filter(id => id !== senderId))
         }
       })
       .subscribe((status) => {
@@ -186,10 +197,12 @@ export default function CommunityCallPage() {
           audioEl = document.createElement('audio')
           audioEl.id = `audio-${targetPeerId}`
           audioEl.autoplay = true
-          audioEl.playsInline = true
+          audioEl.controls = true // Ditampilkan agar bisa di-tap jika diblokir browser HP
+          audioEl.className = 'w-full my-1'
           remoteAudioContainerRef.current.appendChild(audioEl)
         }
         audioEl.srcObject = remoteStream
+        audioEl.play().catch(e => console.log('Autoplay dicegah browser, perlu interaksi klik:', e))
       }
     }
 
@@ -197,12 +210,20 @@ export default function CommunityCallPage() {
   }
 
   async function cleanupWebRTC() {
+    if (signalingChannelRef.current) {
+      signalingChannelRef.current.send({
+        type: 'broadcast',
+        event: 'signal',
+        payload: { senderId: myPeerId.current, type: 'leave', data: {} },
+      })
+    }
     Object.values(peersRef.current).forEach((pc) => pc.close())
     peersRef.current = {}
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop())
       localStreamRef.current = null
     }
+    setActivePeers([])
   }
 
   async function fetchRooms() {
@@ -317,7 +338,6 @@ export default function CommunityCallPage() {
         setIsScreenSharing(true)
         stream.getVideoTracks()[0].onended = () => setIsScreenSharing(false)
       } catch (err) {
-        console.error(err)
         alert('Berbagi layar dibatalkan atau tidak diizinkan oleh sistem.')
       }
     }
@@ -366,8 +386,6 @@ export default function CommunityCallPage() {
         </div>
       )}
 
-      <div ref={remoteAudioContainerRef} className="hidden" />
-
       {/* Sidebar */}
       <div className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col hidden md:flex">
         <div className="p-4 border-b border-slate-800 font-bold text-sm text-emerald-400">NUSANTARA NEXUS</div>
@@ -401,7 +419,7 @@ export default function CommunityCallPage() {
                 isAudioActive ? 'bg-red-600 text-white animate-pulse' : 'bg-emerald-600 text-white'
               }`}
             >
-              {isAudioActive ? '🔴 Matikan Suara' : '🎙️ Mikrofon'}
+              {isAudioActive ? `🔴 Matikan Suara (${activePeers.length} Terhubung)` : '🎙️ Mikrofon'}
             </button>
 
             <button
@@ -419,6 +437,15 @@ export default function CommunityCallPage() {
             >
               📥 Absen ({attendance.length})
             </button>
+          </div>
+        </div>
+
+        {/* Panel Audio Masuk (Muncul jika ada suara aktif agar bisa diputar di HP) */}
+        <div className="px-3 bg-slate-900/50 border-b border-slate-800">
+          <div ref={remoteAudioContainerRef} className="text-xs text-slate-400 py-1">
+            {isAudioActive && activePeers.length === 0 && (
+              <span className="text-amber-400 text-[11px]">Menunggu partisipan lain bergabung ke saluran suara...</span>
+            )}
           </div>
         </div>
 
